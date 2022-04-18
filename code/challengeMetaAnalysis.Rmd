@@ -1,0 +1,368 @@
+---
+title: "Challenge Data Meta Analysis"
+date: "Last modified on `r Sys.Date()`"
+output: 
+  html_document:
+    highlight: tango
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    toc: yes
+    toc_depth: 3  
+---
+
+<style>
+body {
+  font-family: sans-serif;
+  font-size: 18px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r, include=FALSE}
+source("load.R")
+source("functions.R")
+collated_url <- "https://docs.google.com/spreadsheets/d/1oiUUcNZdZ-EccKtZpG_o7DLiKM8F5n69YScqjkpC0X8"
+```
+
+## Background
+
+---
+
+DREAM challenges lead the field of crowdsourced benchmarking in biomedical sciences. Between 2012 - 2021, DREAM has organized and completed almost 45 challenges. While most of the challenge outcomes have been documented, evaluated, and published in well-known peer reviewed journals, it is time to review the challenges themselves to understand more about what makes challenges successful and what could be improved upon.
+
+## Question
+
+---
+
+Do **DREAM** challenges form clusters according to features?
+
+## Input Data
+
+---
+
+[Collated Challenge Features](https://docs.google.com/spreadsheets/d/1oiUUcNZdZ-EccKtZpG_o7DLiKM8F5n69YScqjkpC0X8/edit#gid=0)
+
+```{r}
+# need config your gmail if it is the first time running
+suppressMessages(
+  dream_data <- read_sheet(collated_url, range = "DREAM!A2:AJ47")
+)
+
+glimpse(dream_data)
+```
+
+### Current Selected/Used Features
+
+```{r}
+num_feats <- c("challengeAge", "numberTotalSubmissions", "numberOfTotalRegistrants", "numberOfDataTypes", 
+              colnames(dream_data)[25:36]) # all user engagement data
+cate_feats <- c("dataTypeTiers", "sponsorTiers", "contributorTiers")
+logi_feats <- c("modelContainerization", "monetaryIncentive", "speakingIncentive")
+
+all_feats <- c(num_feats, cate_feats, logi_feats)
+metadata <- dream_data[, c("challengeName", all_feats)] %>% tibble::column_to_rownames("challengeName")
+glimpse(metadata)
+```
+
+<br>
+
+- **Numerical Data**: ``r num_feats``
+- **Categorical Data**: ``r cate_feats``
+- **Logical Data**: ``r logi_feats``
+
+```{r}
+num_inx <- which(colnames(metadata) %in% num_feats)
+```
+
+## Data Transformation
+
+Most features are strong positively skewed.
+```{r}
+num_dat <- metadata[, num_inx] %>% 
+  select(-c(numberTotalSubmissions, numberOfTotalRegistrants)) %>%
+  na.omit()
+
+plot(hist(as.matrix(num_dat), breaks = 600), main = "Histogram on Continuous Data", xlab = NULL, xlim = c(0, 500))
+```
+
+## Exploratory Heatmap {.tabset}
+
+---
+
+### Keep All Missing Data
+
+```{r}
+all_dat <- metadata
+all_dat[, -num_inx] <- lapply(all_dat[, -num_inx], as.factor)
+all_dat <- dplyr::select(all_dat, -c("numberTotalSubmissions","numberOfTotalRegistrants"))
+all_gower_dist <- daisy(all_dat, metric = "gower", type = list(logratio = 2))
+```
+
+#### Check with Silhouette
+```{r}
+all_gower_mat <- as.matrix(all_gower_dist)
+plotSilhouette(all_gower_mat)
+# 
+all_pam_dat <- pam(all_gower_dist, diss = TRUE, k = 2)
+all_pam_clusters <- factor(all_pam_dat$clustering)
+```
+#### tsne
+```{r}
+# challenges_c1 <- names(pam_clusters[pam_clusters == 1])
+# challenges_c2 <- names(pam_clusters[pam_clusters == 2])
+
+plotDistTSNE(all_gower_dist, 
+             cluster = all_pam_clusters, 
+             label = strtrim(rownames(all_dat), 9),
+             seed = 1234)
+
+plotDistTSNE(all_gower_dist, 
+             cluster = all_pam_clusters, 
+             label = all_dat$challengeAge,
+             seed = 1234)
+```
+
+#### summary
+```{r}
+all_quan_dat <- metadata[, num_inx]
+all_quan_dat$clusters <- all_pam_clusters
+all_quan_dat %>%
+  group_by(clusters) %>% 
+  summarise_each(funs(sum(is.na(.)))) %>%
+  t() %>%
+  DT::datatable()
+```
+
+#### boxplot
+```{r,fig.height=8}
+plotQuanBoxplot(all_quan_dat)
+```
+
+### Removed User Engagement Features
+```{r}
+rm_ue_dat <- metadata[, c(1,4, 17:22)]
+rm_ue_dat[, 3:8] <- lapply(rm_ue_dat[, 3:8], as.factor)
+rm_ue_gower_dist <- daisy(rm_ue_dat,
+                    metric = "gower" ,
+                    type = list(logratio = 2))
+```
+
+#### silhouette
+```{r}
+rm_ue_gower_mat <- as.matrix(rm_ue_gower_dist)
+plotSilhouette(rm_ue_gower_mat)
+```
+
+```{r}
+rm_ue_pam_dat <- pam(rm_ue_gower_dist, diss = TRUE, k = 5)
+rm_ue_pam_clusters <- factor(rm_ue_pam_dat$clustering)
+```
+
+#### tsne
+```{r}
+plotDistTSNE(rm_ue_gower_dist, 
+             cluster = rm_ue_pam_clusters, 
+             label = strtrim(rownames(rm_ue_dat), 9),
+             seed = 3345)
+```
+
+```{r}
+rm_ue_quan_dat <- metadata[, num_inx]
+rm_ue_quan_dat$clusters <- as.factor(rm_ue_pam_clusters)
+```
+
+#### boxplot
+```{r, fig.height=8}
+plotQuanBoxplot(rm_ue_quan_dat)
+```
+
+```{r}
+rm_ue_qual_dat3 <- metadata[, c(1,4, 17:22)]
+rm_ue_qual_dat3$clusters <- as.factor(rm_ue_pam_clusters)
+pp <- plotQualBar(rm_ue_qual_dat3)
+
+(pp[[4]] + pp[[5]]) + plot_layout(guides = "collect")
+((pp[[1]] + pp[[2]] + pp[[3]]) + plot_layout(guides = "collect"))
+pp[[6]]
+```
+
+
+
+#### PCA
+
+```{r}
+# FAMD (Factor Analysis of Mixed Data)
+pca_dat <- rm_ue_dat
+pca_dat[, 1:2] <- scale(as.data.frame(apply(pca_dat[, 1:2], 2, transform_log2)))
+# pca_dat[, num_inx] <- scale(as.data.frame(apply(pca_dat[, num_inx], 2, transform_log2)))
+# pca_dat[, cate_feats] <- lapply(pca_dat[, cate_feats], function(x) as.factor(x))
+# impute missing values
+pca_dat <- replace_na(pca_dat, "Missing")
+# get PCA data
+famd_res <- FAMD(pca_dat, graph = FALSE)
+fviz_contrib(famd_res, "var", axes = 1)
+# Contribution to the second dimension
+fviz_contrib(famd_res, "var", axes = 2)
+```
+
+### Use Challenges from cluster 2 
+
+```{r}
+new_chlg_dat <- metadata[24:45, ]
+new_chlg_dat[, -num_inx] <- lapply(new_chlg_dat[, -num_inx], as.factor)
+new_chlg_dat <- dplyr::select(new_chlg_dat, -c("numberTotalSubmissions","numberOfTotalRegistrants"))
+new_chlg_gower_dist <- 
+  daisy(new_chlg_dat,
+        metric = "gower" ,
+        type = list(logratio = 2))
+```
+
+#### silhouette
+```{r}
+new_chlg_gower_mat <- as.matrix(new_chlg_gower_dist)
+plotSilhouette(new_chlg_gower_mat, k = 15)
+```
+
+```{r}
+new_chlg_pam_dat <- pam(new_chlg_gower_dist, diss = TRUE, k = 2)
+new_chlg_pam_clusters <- factor(new_chlg_pam_dat$clustering)
+```
+
+#### tsne
+```{r}
+plotDistTSNE(new_chlg_gower_dist, 
+             cluster = new_chlg_pam_clusters, 
+             label = strtrim(rownames(new_chlg_dat), 9),
+             seed = 1234)
+```
+
+```{r}
+new_chlg_quan_dat <- metadata[24:45, num_inx]
+new_chlg_quan_dat$clusters <- as.factor(new_chlg_pam_clusters)
+```
+
+#### boxplot
+```{r}
+plotQuanBoxplot(new_chlg_quan_dat)
+```
+
+
+```{r}
+pheatmap(new_chlg_gower_mat, scale = "none",show_colnames = F)
+```
+
+
+```{r,fig.height=10}
+hc <- lapply(c("single", "average", "complete"), function(clust) {
+  hclust(new_chlg_gower_dist, method = clust)
+})
+par(mar = c(0,0,4,15))
+# {
+#   as.dendrogram(hc[[1]]) %>%
+#     plot(axes = FALSE, horiz = TRUE, main = "single")
+#   # abline(v = 0.2, lty = 2)
+# }
+# {
+#   as.dendrogram(hc[[2]]) %>%
+#     set("labels_col", k = 4) %>%
+#     set("branches_k_color", k = 4) %>%
+#     plot(axes = FALSE, horiz = TRUE, main = "average")
+#   abline(v = 0.35, lty = 2)
+# }
+{
+  as.dendrogram(hc[[3]]) %>%
+    set("labels_col", k = 5) %>%
+    set("branches_k_color", k = 5) %>%
+    plot(axes = TRUE, horiz = TRUE, main = "complete")
+  abline(v = 0.42, lty = 2)
+}
+```
+#### hc-tsne
+```{r}
+hc_clusters <- cutree(hc[[3]], k = 5)
+plotDistTSNE(new_chlg_gower_dist, 
+             cluster = factor(hc_clusters), 
+             label = strtrim(rownames(new_chlg_dat), 9),
+             seed = 3334)
+```
+#### PCA
+```{r}
+# FAMD (Factor Analysis of Mixed Data)
+# pca_dat <- new_chlg_dat
+# pca_dat[, 1:14] <- scale(as.data.frame(apply(pca_dat[, 1:14], 2, transform_log2)))
+# pca_dat[, 15:20] <- lapply(pca_dat[, 15:20], function(x) as.factor(x))
+# # impute missing values
+# res.impute <- imputeFAMD(pca_dat)
+# # get PCA data
+# famd_res <- FAMD(pca_dat, tab.disj = res.impute$tab.disj, graph = FALSE)
+# fviz_screeplot(famd_res, addlabels = TRUE, ylim = c(0, 50)) + labs(title = "Explained Variance Pct each PC")
+# fviz_contrib(famd_res, "var", axes = 1)
+# # Contribution to the second dimension
+# fviz_contrib(famd_res, "var", axes = 2)
+# f1 <- famd_res$var$contrib[,1] %>% sort(decreasing = T) %>% head(9) %>% names
+# f2 <- famd_res$var$contrib[,2] %>% sort(decreasing = T) %>% head(3) %>% names
+# unique(f1,f2)
+# 
+# 
+# pairs(metadata[, c("numberTotalSubmissions", "numberOfTotalRegistrants", unique(f1,f2))])
+
+```
+
+#### hc-boxplot
+```{r}
+new_chlg_quan_dat <- metadata[24:45, num_inx]
+new_chlg_quan_dat$clusters <- as.factor(hc_clusters)
+data.frame(hc_clusters %>% sort)
+```
+
+#### boxplot
+```{r, fig.height=8}
+plotQuanBoxplot(new_chlg_quan_dat)
+```
+```{r}
+new_chlg_qual_dat3 <- metadata[24:45, -num_inx]
+new_chlg_qual_dat3$clusters <- as.factor(hc_clusters)
+new_chlg_qual_dat3 <- new_chlg_qual_dat3 %>%
+  tibble::rownames_to_column("name") %>%
+  replace_na("Missing") %>%
+  separate_rows(dataTypeTiers) %>%
+  separate_rows(sponsorTiers) %>%
+  separate_rows(contributorTiers) %>%
+  gather("key", "value", -c(name, clusters)) %>%
+  distinct() %>%
+  mutate(key = as.factor(key))
+
+p3 <- lapply(c("dataTypeTiers", 
+              "sponsorTiers", "contributorTiers", 
+              "modelContainerization", "monetaryIncentive", "speakingIncentive"), function(feat) {
+  
+  p.data <- filter(new_chlg_qual_dat3, key == feat)
+  
+  if (feat %in% c("sponsorTiers", "contributorTiers")) {
+    p.data$value <- factor(p.data$value, 
+                     levels = c("Academic", "Government","Industrial","Foundation",
+                                "Other", "Missing"))
+  }
+  out <- ggplot(p.data,
+    aes(clusters, fill = value)) + 
+    geom_bar(stat = "count") +
+    labs(y = NULL) + 
+    facet_wrap(~key, ncol = 4, scale="free") +
+    ggsci::scale_fill_jco() +
+    theme_bw()
+  
+  # if (feat == "dataTypeTiers") {
+  #   out <- out + scale_fill_brewer(palette = "Dark2")
+  # }
+  return(out)
+})
+  (( p3[[2]] + p3[[3]]) + plot_layout(guides = "collect"))
+((p3[[4]] + p3[[5]] + p3[[6]]) + plot_layout(guides = "collect"))
+
+p3[[1]]
+```
+
