@@ -11,13 +11,6 @@ output:
     toc_depth: 3  
 ---
 
-<style>
-body {
-  font-family: sans-serif;
-  font-size: 18px;
-}
-</style>
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```
@@ -25,6 +18,10 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 ```{r, include=FALSE}
 source("load.R")
 source("functions.R")
+```
+
+```{r}
+# input data - challenge landscape spreadsheet
 collated_url <- "https://docs.google.com/spreadsheets/d/1oiUUcNZdZ-EccKtZpG_o7DLiKM8F5n69YScqjkpC0X8"
 ```
 
@@ -38,7 +35,7 @@ DREAM challenges lead the field of crowdsourced benchmarking in biomedical scien
 
 ---
 
-Do **DREAM** challenges form clusters according to features?
+- Do **DREAM** challenges form clusters according to features?
 
 ## Input Data
 
@@ -58,13 +55,18 @@ glimpse(dream_data)
 ### Current Selected/Used Features
 
 ```{r}
-num_feats <- c("challengeAge", "numberTotalSubmissions", "numberOfTotalRegistrants", "numberOfDataTypes", 
-              colnames(dream_data)[25:36]) # all user engagement data
+num_feats <- c("challengeAge", 
+               "numberTotalSubmissions", 
+               "numberOfTotalRegistrants", 
+               "numberOfDataTypes", 
+               colnames(dream_data)[25:36] # all user engagement data
+               )
 cate_feats <- c("dataTypeTiers", "sponsorTiers", "contributorTiers")
 logi_feats <- c("modelContainerization", "monetaryIncentive", "speakingIncentive")
 
 all_feats <- c(num_feats, cate_feats, logi_feats)
-metadata <- dream_data[, c("challengeName", all_feats)] %>% tibble::column_to_rownames("challengeName")
+metadata <- dream_data[, c("challengeName", all_feats)] %>%
+  tibble::column_to_rownames("challengeName")
 glimpse(metadata)
 ```
 
@@ -75,46 +77,64 @@ glimpse(metadata)
 - **Logical Data**: ``r logi_feats``
 
 ```{r}
+# save the index of numeric features
 num_inx <- which(colnames(metadata) %in% num_feats)
 ```
 
 ## Data Transformation
 
-Most features are strong positively skewed.
+The continuous data is strong positively skewed. We will need to apply the log transformation on continuous data before performing clustering or PCA.
+
 ```{r}
 num_dat <- metadata[, num_inx] %>% 
   select(-c(numberTotalSubmissions, numberOfTotalRegistrants)) %>%
   na.omit()
 
-plot(hist(as.matrix(num_dat), breaks = 600), main = "Histogram on Continuous Data", xlab = NULL, xlim = c(0, 500))
+hist(as.matrix(num_dat), breaks = 600, main = "Histogram on Continuous Data", xlab = NULL, xlim = c(0, 500))
 ```
 
 ## Exploratory Heatmap {.tabset}
 
 ---
 
-### Keep All Missing Data
+I have initially one-hot encode categorical features and did clustering with the euclidean distance. However, various types of categorical data introduces large sparsity in the heatmap and one-hot encoding is not easy to interpret with many missing data.
+
+Alternatively, we chose "Gower Distance". Gower is a distance method popularly used for mixed type data:
+- It can handle missing data
+- It works with mixed data types. It calculates similarity coefficients using specific metrics for each data type (continuous, ordinal, categorical)
+- The distance matrix it creates is easily interpretable on a heatmap
+
+
+### part 1
+
+#### Gower distance heatmap
+Create heatmap using gower distance to explore pattern. The number of participants and registrants were excluded. The dissimilarity matrix/distance matrix is calculated using `cluster::daisy` function. 
 
 ```{r}
+# make a copy of metadata
 all_dat <- metadata
 all_dat[, -num_inx] <- lapply(all_dat[, -num_inx], as.factor)
 all_dat <- dplyr::select(all_dat, -c("numberTotalSubmissions","numberOfTotalRegistrants"))
+# apply log2 and gower distance
 all_gower_dist <- daisy(all_dat, metric = "gower", type = list(logratio = 2))
+
+pheatmap(all_gower_dist)
 ```
 
-#### Check with Silhouette
+#### Partition Around Medoids (PAM)
+
+We chose Partition Around Medoids (PAM) to further determine the number of clusters. Check with Silhouette plot to choose k.
+
 ```{r}
 all_gower_mat <- as.matrix(all_gower_dist)
 plotSilhouette(all_gower_mat)
-# 
 all_pam_dat <- pam(all_gower_dist, diss = TRUE, k = 2)
 all_pam_clusters <- factor(all_pam_dat$clustering)
 ```
-#### tsne
-```{r}
-# challenges_c1 <- names(pam_clusters[pam_clusters == 1])
-# challenges_c2 <- names(pam_clusters[pam_clusters == 2])
 
+#### TSNE
+```{r}
+# check tsne by age
 plotDistTSNE(all_gower_dist, 
              cluster = all_pam_clusters, 
              label = strtrim(rownames(all_dat), 9),
@@ -126,7 +146,7 @@ plotDistTSNE(all_gower_dist,
              seed = 1234)
 ```
 
-#### summary
+#### Feature summary by clusters
 ```{r}
 all_quan_dat <- metadata[, num_inx]
 all_quan_dat$clusters <- all_pam_clusters
@@ -137,12 +157,14 @@ all_quan_dat %>%
   DT::datatable()
 ```
 
-#### boxplot
+#### Feature boxplot by clusters
 ```{r,fig.height=8}
 plotQuanBoxplot(all_quan_dat)
 ```
 
-### Removed User Engagement Features
+### part 1
+
+#### Sanity check by removing user engagement features
 ```{r}
 rm_ue_dat <- metadata[, c(1,4, 17:22)]
 rm_ue_dat[, 3:8] <- lapply(rm_ue_dat[, 3:8], as.factor)
@@ -151,7 +173,7 @@ rm_ue_gower_dist <- daisy(rm_ue_dat,
                     type = list(logratio = 2))
 ```
 
-#### silhouette
+#### Clustering
 ```{r}
 rm_ue_gower_mat <- as.matrix(rm_ue_gower_dist)
 plotSilhouette(rm_ue_gower_mat)
@@ -162,7 +184,7 @@ rm_ue_pam_dat <- pam(rm_ue_gower_dist, diss = TRUE, k = 5)
 rm_ue_pam_clusters <- factor(rm_ue_pam_dat$clustering)
 ```
 
-#### tsne
+#### TSNE
 ```{r}
 plotDistTSNE(rm_ue_gower_dist, 
              cluster = rm_ue_pam_clusters, 
@@ -175,7 +197,7 @@ rm_ue_quan_dat <- metadata[, num_inx]
 rm_ue_quan_dat$clusters <- as.factor(rm_ue_pam_clusters)
 ```
 
-#### boxplot
+#### Feature boxplot by clusters
 ```{r, fig.height=8}
 plotQuanBoxplot(rm_ue_quan_dat)
 ```
@@ -191,25 +213,26 @@ pp[[6]]
 ```
 
 
-
-#### PCA
+#### PCA - TBC
 
 ```{r}
 # FAMD (Factor Analysis of Mixed Data)
-pca_dat <- rm_ue_dat
-pca_dat[, 1:2] <- scale(as.data.frame(apply(pca_dat[, 1:2], 2, transform_log2)))
-# pca_dat[, num_inx] <- scale(as.data.frame(apply(pca_dat[, num_inx], 2, transform_log2)))
-# pca_dat[, cate_feats] <- lapply(pca_dat[, cate_feats], function(x) as.factor(x))
-# impute missing values
-pca_dat <- replace_na(pca_dat, "Missing")
-# get PCA data
-famd_res <- FAMD(pca_dat, graph = FALSE)
-fviz_contrib(famd_res, "var", axes = 1)
-# Contribution to the second dimension
-fviz_contrib(famd_res, "var", axes = 2)
+# pca_dat <- rm_ue_dat
+# pca_dat[, 1:2] <- scale(as.data.frame(apply(pca_dat[, 1:2], 2, transform_log2)))
+# # pca_dat[, num_inx] <- scale(as.data.frame(apply(pca_dat[, num_inx], 2, transform_log2)))
+# # pca_dat[, cate_feats] <- lapply(pca_dat[, cate_feats], function(x) as.factor(x))
+# # impute missing values
+# pca_dat <- replace_na(pca_dat, "Missing")
+# # get PCA data
+# famd_res <- FAMD(pca_dat, graph = FALSE)
+# fviz_contrib(famd_res, "var", axes = 1)
+# # Contribution to the second dimension
+# fviz_contrib(famd_res, "var", axes = 2)
 ```
 
-### Use Challenges from cluster 2 
+### part 3
+
+#### Analysis on teh challenges from cluster 2 
 
 ```{r}
 new_chlg_dat <- metadata[24:45, ]
@@ -221,7 +244,7 @@ new_chlg_gower_dist <-
         type = list(logratio = 2))
 ```
 
-#### silhouette
+#### Sub-clustering
 ```{r}
 new_chlg_gower_mat <- as.matrix(new_chlg_gower_dist)
 plotSilhouette(new_chlg_gower_mat, k = 15)
@@ -232,7 +255,7 @@ new_chlg_pam_dat <- pam(new_chlg_gower_dist, diss = TRUE, k = 2)
 new_chlg_pam_clusters <- factor(new_chlg_pam_dat$clustering)
 ```
 
-#### tsne
+#### TSNE
 ```{r}
 plotDistTSNE(new_chlg_gower_dist, 
              cluster = new_chlg_pam_clusters, 
@@ -245,7 +268,7 @@ new_chlg_quan_dat <- metadata[24:45, num_inx]
 new_chlg_quan_dat$clusters <- as.factor(new_chlg_pam_clusters)
 ```
 
-#### boxplot
+#### Feature boxplot by clusters
 ```{r}
 plotQuanBoxplot(new_chlg_quan_dat)
 ```
@@ -255,7 +278,7 @@ plotQuanBoxplot(new_chlg_quan_dat)
 pheatmap(new_chlg_gower_mat, scale = "none",show_colnames = F)
 ```
 
-
+#### Check dendrogram of clustering
 ```{r,fig.height=10}
 hc <- lapply(c("single", "average", "complete"), function(clust) {
   hclust(new_chlg_gower_dist, method = clust)
@@ -281,7 +304,8 @@ par(mar = c(0,0,4,15))
   abline(v = 0.42, lty = 2)
 }
 ```
-#### hc-tsne
+
+#### TSNE - Hierarchical clustering
 ```{r}
 hc_clusters <- cutree(hc[[3]], k = 5)
 plotDistTSNE(new_chlg_gower_dist, 
@@ -289,7 +313,8 @@ plotDistTSNE(new_chlg_gower_dist,
              label = strtrim(rownames(new_chlg_dat), 9),
              seed = 3334)
 ```
-#### PCA
+
+#### PCA - TBC
 ```{r}
 # FAMD (Factor Analysis of Mixed Data)
 # pca_dat <- new_chlg_dat
@@ -309,17 +334,15 @@ plotDistTSNE(new_chlg_gower_dist,
 # 
 # 
 # pairs(metadata[, c("numberTotalSubmissions", "numberOfTotalRegistrants", unique(f1,f2))])
-
 ```
 
-#### hc-boxplot
+#### Boxplot - Hierarchical clustering
 ```{r}
 new_chlg_quan_dat <- metadata[24:45, num_inx]
 new_chlg_quan_dat$clusters <- as.factor(hc_clusters)
-data.frame(hc_clusters %>% sort)
+# data.frame(hc_clusters %>% sort)
 ```
 
-#### boxplot
 ```{r, fig.height=8}
 plotQuanBoxplot(new_chlg_quan_dat)
 ```
