@@ -1,0 +1,350 @@
+---
+title: "Challenge Data Meta Analysis"
+date: "Last modified on `r Sys.Date()`"
+output: 
+  html_document:
+    highlight: tango
+    toc_float: true
+    toc_collapsed: true
+    theme: united
+    toc: yes
+    toc_depth: 3  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+update_res <- FALSE
+figure_dir <- "../figures"
+```
+
+```{r, include=FALSE}
+suppressPackageStartupMessages({
+  library("tidyverse")
+  library("data.table")
+  library("splitstackshape")
+  # library("caret")
+  library("mltools")
+  library("pheatmap")
+  # library("googlesheets4")
+  library("pheatmap")
+  library("dendextend")
+  library("patchwork")
+  library("cluster")
+  library("Rtsne")
+  library("ggpubr")
+  library("ggsci")
+})
+source("functions.R")
+```
+
+## Background
+
+---
+
+DREAM challenges lead the field of crowdsourced benchmarking in biomedical sciences. Between 2012 - 2021, DREAM has organized and completed almost 45 challenges. While most of the challenge outcomes have been documented, evaluated, and published in well-known peer reviewed journals, it is time to review the challenges themselves to understand more about what makes challenges successful and what could be improved upon.
+
+## Question
+
+---
+
+- Do **DREAM** challenges form clusters according to features?
+
+## Input Data
+
+---
+
+[Collated Challenge Features](https://docs.google.com/spreadsheets/d/1oiUUcNZdZ-EccKtZpG_o7DLiKM8F5n69YScqjkpC0X8/edit#gid=0)
+
+```{r}
+dream_data <- fread("../data/dream_v1.csv", data.table = FALSE, header = TRUE) %>%
+  janitor::row_to_names(1) %>%
+  # remove the BraTS for now
+  filter(challengeName != "International Brain Tumor Segmentation")
+
+glimpse(dream_data)
+```
+
+### Current Selected/Used Features
+
+```{r categorize}
+# categorize different features
+forum_feats <- colnames(dream_data)[27:38] # all user engagement data
+num_feats <- c("challengeAge",
+               "numberTotalSubmissions", 
+               "numberOfTotalRegistrants", 
+               "numberOfDataTypes",
+               "numberOfSubChallenges",
+               forum_feats
+               )
+cate_feats <- c("dataTypeTiers", "sponsorTiers", "contributorTiers")
+logi_feats <- c("modelContainerization", "monetaryIncentive", "speakingIncentive")
+
+all_feats <- c(num_feats, cate_feats, logi_feats)
+
+metadata <- dream_data[, c("challengeName", all_feats)] %>%
+  tibble::column_to_rownames("challengeName") %>%
+  # clean up types from exported csv
+  mutate_at(num_feats, as.numeric) %>%
+  mutate_at(c(cate_feats, logi_feats), as.factor)
+
+glimpse(metadata)
+```
+
+<br>
+
+- **Numerical Data**: ``r num_feats``
+- **Categorical Data**: ``r cate_feats``
+- **Logical Data**: ``r logi_feats``
+
+## Data Transformation
+
+The continuous data is strong positively skewed. We will need to apply the log transformation on continuous data before performing clustering or PCA.
+
+```{r}
+# save the index of numeric features
+num_inx <- which(colnames(metadata) %in% num_feats)
+num_data <- metadata[, num_inx] %>% 
+  select(-c(numberTotalSubmissions, numberOfTotalRegistrants)) %>%
+  na.omit() %>%
+  as.matrix()
+
+# pdf(file.path(figure_dir, "histogram_continuous_data.pdf"), width = 10, height = 4)
+
+par(mfrow = c(1, 2), mgp = c(2.4, 0.6, 0))
+hist(num_data, breaks = 100, main = "positive skewed", 
+     xlab = NULL, xlim = c(0, 500), col = "lightblue", 
+     cex.main = 1.2, cex.lab = 1.2, cex.axis = 1)
+
+# log2 tranformation
+num_data_log2 <- log2(num_data + 0.1)
+hist(num_data_log2, breaks = 20, main = "after log transformation", 
+     xlab = NULL, ylab = NULL,  xlim = c(0, 11), col = rgb(1, 0, 0, 0.5), 
+     cex.main = 1.2, cex.lab = 1.2, cex.axis = 1)
+
+# dev.off()
+```
+
+## Exploratory Heatmap {.tabset}
+
+---
+
+I have initially one-hot encode categorical features and did clustering with the euclidean distance. However, various types of categorical data introduces large sparsity in the heatmap and one-hot encoding is not easy to interpret with many missing data.
+
+Alternatively, we chose "Gower Distance". Gower is a distance method popularly used for mixed type data:
+- It can handle missing data
+- It works with mixed data types. It calculates similarity coefficients using specific metrics for each data type (continuous, ordinal, categorical)
+- The distance matrix it creates is easily interpretable on a heatmap
+
+
+### All challenges
+
+#### Gower distance heatmap
+Create heatmap using gower distance to explore pattern. The number of participants and registrants were excluded. The dissimilarity matrix/distance matrix is calculated using `cluster::daisy` function. 
+
+```{r}
+# make a copy of metadata
+all_dat <- metadata
+# all_dat$challengeAge <- as.factor(all_dat$challengeAge)
+
+# calculate gower distance with all features
+# apply log2 and gower distance
+all_gower_dist <- daisy(all_dat, metric = "gower", type = list(logratio = 2))
+all_gower_mat <- as.matrix(all_gower_dist)
+
+
+heatmap_all_gower <- pheatmap(all_gower_mat, show_colnames = FALSE, show_rownames = FALSE, cutree_cols = 3)
+
+if (update_res) {
+  heatmap_all_gower <- pheatmap(all_gower_mat, show_colnames = FALSE, cutree_cols = 3, fontsize = 24) # poster
+  ggsave(file.path(figure_dir, "heatmap_all_gower.pdf"), heatmap_all_gower, width = 24, height = 16 , limitsize = FALSE)
+}
+```
+
+#### Partition Around Medoids (PAM)
+
+We chose Partition Around Medoids (PAM) to further determine the number of clusters. According to the Silhouette plot, when k = 2, challenges will have the highest Silhouette width.
+
+```{r}
+# plot silhouette width
+# pdf(file.path(figure_dir, "pam_all_data.pdf"))
+plotSilhouette(all_gower_mat, k = 2, n = 15)
+# dev.off()
+
+# clustering with PAM
+all_pam_dat <- pam(all_gower_dist, diss = TRUE, k = 2)
+all_pam_clusters <- factor(all_pam_dat$clustering)
+
+# plot tnse
+# pdf(file.path(figure_dir, "tsne_all_data.pdf"), width = 16, height = 8)
+age_level <- factor(
+  ifelse(metadata$challengeAge > (2022-2016), "old", "young"), 
+  levels = c("old", "young"))
+plotDistTSNE(all_gower_dist, 
+             cluster = all_pam_clusters, 
+             label = age_level,
+             color = age_level,
+             color.legend.title = "Age Level",
+             seed = 1234) 
+# dev.off()
+```
+
+Since user engagement data was not well applied until 2016, it makes sense that there are two clear clusters of challenges by the ages. 
+
+#### Feature summary by clusters
+```{r, include=FALSE}
+all_quan_dat <- metadata[, num_inx]
+# all_quan_dat <- sapply(all_quan_dat, as.numeric)
+# all_quan_dat <- as.data.frame(log2(all_quan_dat + 0.1))
+all_quan_dat$clusters <- as.factor(all_pam_clusters)
+```
+
+#### Boxplot by clusters
+```{r,fig.height=8}
+# quantitative features
+output_feat <-  c("numberTotalSubmissions", "numberOfTotalRegistrants")
+ue_plot_feat <- c("numberOfAuthors", "numberOfFollowers", "numberOfThreads", 
+                  "maxRepliesPerThread", "maxViewsPerThread", "AvgResponsesPerCommenter")
+feature_to_plot <- c("challengeAge", output_feat, ue_plot_feat)
+bp_all_data <- plotQuanBoxplot(select(all_quan_dat, c("clusters",all_of(feature_to_plot))), 
+                               test.method = "wilcox.test", pos.x = 0.18, pos.y = 0.98
+                               )
+bp_all_data
+if (update_res) ggsave(file.path(figure_dir, "boxplot_all_data.pdf"), bp_all_data, width = 10, height = 8)
+```
+
+```{r}
+# qualitative features
+qual_data_all <- lapply(c(cate_feats, logi_feats), function(col) {
+ data.frame(metadata[, col]) %>%
+    replace_na("Unknown") %>%
+    set_names(col) %>%
+    splitstackshape::cSplit_e(col, sep= ',', type = 'character', fill = 0, drop = TRUE)
+}) %>% bind_cols()
+# count number of values per cluster
+qual_data_all$clusters <- as.factor(all_pam_clusters)
+qual_counts_all <- qual_data_all %>% 
+  gather(key, value, -clusters) %>% 
+  group_by(clusters, key, .drop = TRUE) %>% 
+  summarise(n = sum(value)) %>%
+  spread(key, n) %>%
+  tibble::column_to_rownames("clusters")
+# calculate fisher exact test for each category
+qual_res_all <-sapply(c(cate_feats, logi_feats), function(col) {
+  contingency <- qual_counts_all %>% select(starts_with(col))
+  res <- fisher.test(contingency)
+  res$p.value
+}) %>% 
+  set_names(c(cate_feats, logi_feats)) %>%
+  p.adjust("BH")
+qual_res_all
+#         dataTypeTiers          sponsorTiers      contributorTiers 
+#            0.49474496            0.42975553            0.02753499 
+# modelContainerization     monetaryIncentive     speakingIncentive 
+#            0.02753499            1.00000000            0.27029760 
+
+# frequency plot
+cols_fun <- circlize::colorRamp2(c(0, 10), c("white", "#1b3f61"))
+hp_frq_dat <- select(qual_counts_all,-c("speakingIncentive_FALSE", "monetaryIncentive_FALSE", "modelContainerization_FALSE")) %>% select(-ends_with("Unknown"))
+tmp <- hp_frq_dat
+inx <- which(grepl("FALSE|TRUE", colnames(hp_frq_dat)))
+colnames(tmp)[-inx] <- strsplit(colnames(hp_frq_dat)[-inx], "_") %>% sapply(., `[[`, 2)
+colnames(tmp)[inx] <- strsplit(colnames(hp_frq_dat)[inx], "_") %>% sapply(., `[[`, 1)
+hp_frq_dat <- tmp
+hp_freq_all <- pheatmap(t(hp_frq_dat), cluster_rows = F, cluster_cols = F, color = cols_fun(1:10), angle_col = 0, fontsize = 12)
+if (update_res) ggsave(file.path(figure_dir, "heatmap_frequency_all.pdf"), hp_freq_all, width = 3, height = 6)
+```
+
+### Young challenges Only
+
+#### Analysis on the challenges from cluster 2 (young challenges)
+
+```{r}
+new_chlg_dat <- all_dat[all_pam_clusters == 2, ]
+# remove age as well
+new_chlg_dat <- new_chlg_dat[,-1]
+
+# re-calculate gower distance with subsetted data
+new_chlg_gower_dist <- 
+  daisy(new_chlg_dat,
+        metric = "gower" ,
+        type = list(logratio = 2))
+new_chlg_gower_mat <- as.matrix(new_chlg_gower_dist)
+```
+
+#### Sub-clustering
+```{r}
+# pdf(file.path(figure_dir, "pam_remove_old.pdf"))
+plotSilhouette(new_chlg_gower_mat, k = 5, n = 26)
+# dev.off()
+```
+
+```{r}
+new_chlg_pam_dat <- pam(new_chlg_gower_dist, diss = TRUE, k = 5)
+new_chlg_pam_clusters <- factor(new_chlg_pam_dat$clustering)
+```
+
+#### TSNE
+```{r}
+# pdf(file.path(figure_dir, "tsne_remove_old.pdf"), width = 7, height = 5)
+new_years <- 2022 - as.numeric(all_dat[all_pam_clusters == 2, "challengeAge"])
+plotDistTSNE(new_chlg_gower_dist, 
+             cluster = new_chlg_pam_clusters, 
+             label = new_years,
+             color.legend.title = "clusters",
+             seed = 1)
+# dev.off()
+```
+
+```{r}
+new_chlg_quan_dat <- metadata[all_pam_clusters == 2, num_feats]
+new_chlg_quan_dat$clusters <- as.factor(new_chlg_pam_clusters)
+```
+
+#### Feature boxplot by clusters
+```{r}
+# quantitative features
+bp_remove_old <- plotQuanBoxplot(new_chlg_quan_dat[, c("clusters", feature_to_plot)], test.method = "anova")
+bp_remove_old
+if (update_res) ggsave(file.path(figure_dir, "boxplot_remove_old.pdf"), bp_remove_old, width = 10, height = 7)
+```
+
+
+```{r}
+# qualitative features
+qual_data_rm_old <- lapply(c(cate_feats, logi_feats), function(col) {
+ data.frame(metadata[all_pam_clusters == 2, col]) %>%
+    replace_na("Unknown") %>%
+    set_names(col) %>%
+    splitstackshape::cSplit_e(col, sep= ',', type = 'character', fill = 0, drop = TRUE)
+}) %>% bind_cols()
+# count number of values per cluster
+
+qual_data_rm_old$clusters <- as.factor(new_chlg_pam_clusters)
+# qual_data_rm_old <- qual_data_rm_old[, -grep("Unknown", colnames(qual_data_rm_old))]
+qual_counts_rm_old <- qual_data_rm_old %>%
+  gather(key, value, -clusters) %>% 
+  group_by(clusters, key, .drop = TRUE) %>% 
+  summarise(n = sum(value)) %>%
+  spread(key, n) %>%
+  tibble::column_to_rownames("clusters")
+
+# calculate fisher exact test for each category
+qual_res_rm_old <-sapply(c(cate_feats, logi_feats), function(col) {
+  contingency <- qual_counts_rm_old %>% select(starts_with(col))
+  res <- fisher.test(contingency, simulate.p.value = T)
+  res$p.value
+}) %>% 
+  set_names(c(cate_feats, logi_feats)) %>%
+  p.adjust("BH")
+qual_res_rm_old
+    #     dataTypeTiers          sponsorTiers      contributorTiers modelContainerization 
+    #       0.504947526           0.504947526           0.990504748           0.005997001 
+    # monetaryIncentive     speakingIncentive 
+    #       0.504947526           0.124437781 
+# frequency plot
+cols_fun <- circlize::colorRamp2(c(0, 10), c("white", "#1b3f61"))
+hp_frq_dat <- select(qual_counts_rm_old,-c("speakingIncentive_FALSE", "monetaryIncentive_FALSE", "modelContainerization_FALSE")) %>% select(-ends_with("Unknown"))
+hp_freq_rm_old_rm_ue <- pheatmap(t(hp_frq_dat), cluster_rows = F, cluster_cols = F, color = cols_fun(1:10), angle_col = 0)
+
+if (update_res) ggsave(file.path(figure_dir, "heatmap_frequency_remove_old_rm_ue.pdf"), hp_freq_rm_old_rm_ue, width = 4, height = 6)
+```

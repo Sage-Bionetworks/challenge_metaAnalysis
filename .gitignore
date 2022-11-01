@@ -1,0 +1,7 @@
+*.pdf
+*.png
+*.csv
+*.xlsx
+.Rproj.user
+.Rhistory
+.DS_Store
